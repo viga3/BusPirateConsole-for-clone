@@ -1,0 +1,7 @@
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\obj\Release\BPConsole.csprojResolveAssemblyReference.cache
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\bin\Release\BPConsole.exe
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\bin\Release\BPConsole.pdb
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\obj\Release\BusPirate.BPConsole.resources
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\obj\Release\BPConsole.csproj.GenerateResource.Cache
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\obj\Release\BPConsole.exe
+C:\Users\Michele\Downloads\____Mia\WORK mio\VS\BusPirateConsole-master\obj\Release\BPConsole.pdb

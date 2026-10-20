@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.IO.Ports;
@@ -169,7 +169,7 @@ namespace BusPirate
 
 		private SerialDataReceivedEventHandler handler;
 		private List<string> bp_lines;
-		private string bp_prefix = string.Empty;
+		private string bp_buffer = string.Empty;
 		private bool bp_processing = false;
 		private List<string> bp_waitFor;
 		private bool bp_waitFound;
@@ -180,6 +180,8 @@ namespace BusPirate
 		private List<string> m_prompts;
 		private BP_MODE m_mode;
 		private object m_lock = new object();
+		private object m_bufferLock = new object();
+		private AutoResetEvent m_responseEvent = new AutoResetEvent(false);
 
 		public string HardwareVersion { get; set; }
 		public string FirmwareVersion { get; set; }
@@ -198,7 +200,12 @@ namespace BusPirate
 			IsConnected = false;
 
 			bp_lines = new List<string>(100);
-			m_prompts = new List<string>(BP_CMD_PROMPT.Split(C_SEMICOMMA));
+			m_prompts = new List<string>();
+			foreach (string p in BP_CMD_PROMPT.Split(C_SEMICOMMA))
+			{
+				if (!string.IsNullOrEmpty(p))
+					m_prompts.Add(p.Trim());
+			}
 
 			Pins[0].Type = BP_PIN_TYPE.Power;
 			Pins[1].Type = BP_PIN_TYPE.Power;
@@ -398,12 +405,38 @@ namespace BusPirate
 		internal BP_RESPONSE Voltage()
 		{
 			BP_RESPONSE response = BP_RESPONSE.Disconnect;
-			if (IsConnected &&
-				(response = SendWait("v")) == BP_RESPONSE.OK &&
-				(response = ParseVoltage(GetLine(5))) == BP_RESPONSE.OK &&
-				(response = ParsePinMode(GetLine(4))) == BP_RESPONSE.OK
-				)
-				response = ParsePinName(GetLine(3));
+			if (IsConnected && (response = SendWait("v")) == BP_RESPONSE.OK)
+			{
+				int pinstatesIdx = bp_lines.FindIndex(l => l.StartsWith("Pinstates:", StringComparison.OrdinalIgnoreCase));
+				int startSearch = (pinstatesIdx >= 0) ? pinstatesIdx + 1 : 0;
+
+				string nameLine = null, modeLine = null, voltLine = null;
+				for (int i = startSearch; i < bp_lines.Count; i++)
+				{
+					string line = bp_lines[i];
+					if (string.IsNullOrEmpty(line)) continue;
+
+					string[] parts = line.Split(new char[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+					if (parts.Length > 0 && (parts[0] == "P" || parts[0] == "I" || parts[0] == "O") && parts.Length >= 3)
+					{
+						modeLine = line;
+					}
+					else if (parts.Length > 0 && (parts[0] == "GND" || parts[0].EndsWith("V") || parts[0] == "H" || parts[0] == "L"))
+					{
+						voltLine = line;
+					}
+					else if (nameLine == null && (line.Contains("ADC") || line.Contains("AUX") || line.Contains("CLK") || line.Contains("MOSI") || line.Contains("CS") || line.Contains("MISO") || line.Contains("3.3V") || line.Contains("5.0V") || line.Contains("VPULL")))
+					{
+						nameLine = line;
+					}
+				}
+
+				if (modeLine != null) ParsePinMode(modeLine);
+				if (voltLine != null) ParseVoltage(voltLine);
+				if (nameLine != null) ParsePinName(nameLine);
+
+				response = BP_RESPONSE.OK;
+			}
 			return response;
 		}
 
@@ -412,22 +445,30 @@ namespace BusPirate
 			if (!string.IsNullOrEmpty(modes))
 			{
 				int pin = 0;
-				foreach (string mode in modes.Split(C_TAB))
+				string[] tokens = modes.Split(new char[] { '\t' }, StringSplitOptions.None);
+				if (tokens.Length <= 1)
+					tokens = modes.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+				foreach (string mode in tokens)
 				{
 					if (pin >= Pins.Length)
-						return BP_RESPONSE.BadResponse;
+						break;
+
+					string mStr = mode.Trim();
+					if (string.IsNullOrEmpty(mStr)) continue;
 
 					BP_PIN_TYPE m;
-					if (mode == "P")
+					if (mStr == "P")
 						m = BP_PIN_TYPE.Power;
-					else if (mode == "I" && (pin == 3 || pin == 4))
+					else if (mStr == "I" && (pin == 3 || pin == 4))
 						m = BP_PIN_TYPE.Analog;
-					else if (mode == "I" && (pin >= 5 || pin <= 9))
+					else if (mStr == "I")
 						m = BP_PIN_TYPE.Input;
-					else if (mode == "O" && (pin >= 5 || pin <= 9))
+					else if (mStr == "O")
 						m = BP_PIN_TYPE.Output;
 					else
-						return BP_RESPONSE.BadResponse;
+						continue;
+
 					Pins[pin].Type = m;
 					pin++;
 				}
@@ -441,11 +482,19 @@ namespace BusPirate
 			if (!string.IsNullOrEmpty(names))
 			{
 				int pin = 0;
-				foreach (string name in names.Split(C_TAB))
+				string[] tokens = names.Split(new char[] { '\t' }, StringSplitOptions.None);
+				if (tokens.Length <= 1)
+					tokens = names.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+				foreach (string name in tokens)
 				{
-					if(pin >= Pins.Length)
-						return BP_RESPONSE.BadResponse;
-					Pins[pin].Name = name;
+					if (pin >= Pins.Length)
+						break;
+
+					string nStr = name.Trim();
+					if (string.IsNullOrEmpty(nStr)) continue;
+
+					Pins[pin].Name = nStr;
 					pin++;
 				}
 				return BP_RESPONSE.OK;
@@ -459,26 +508,29 @@ namespace BusPirate
 			{
 				int pin = 0;
 				double val;
-				foreach (string value in values.Split(C_TAB))
+				string[] tokens = values.Split(new char[] { '\t' }, StringSplitOptions.None);
+				if (tokens.Length <= 1)
+					tokens = values.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+				foreach (string value in tokens)
 				{
 					if (pin >= Pins.Length)
-						return BP_RESPONSE.BadResponse;
+						break;
 
-					if (value == "GND")
-						val = 0.0;
-					else if (value == "H")
+					string vStr = value.Trim();
+					if (string.IsNullOrEmpty(vStr)) continue;
+
+					if (vStr == "GND")
+						Pins[pin].Analog = 0.0;
+					else if (vStr == "H")
 						Pins[pin].Digital = true;
-					else if (value == "L")
+					else if (vStr == "L")
 						Pins[pin].Digital = false;
-					else if (value.EndsWith("V"))
+					else if (vStr.EndsWith("V", StringComparison.OrdinalIgnoreCase))
 					{
-						if (!double.TryParse(value.Substring(0, value.Length - 1), System.Globalization.NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out val))
-							return BP_RESPONSE.BadResponse;
-						else
+						if (double.TryParse(vStr.Substring(0, vStr.Length - 1), System.Globalization.NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out val))
 							Pins[pin].Analog = val;
 					}
-					else
-						return BP_RESPONSE.BadResponse;
 					pin++;
 				}
 				return BP_RESPONSE.OK;
@@ -575,36 +627,63 @@ namespace BusPirate
 		public BP_RESPONSE Info()
 		{
 			BP_RESPONSE response = BP_RESPONSE.Disconnect;
-			if (IsConnected &&
-				(response = SendWait("i")) == BP_RESPONSE.OK
-				)
+			if (IsConnected && (response = SendWait("i")) == BP_RESPONSE.OK)
 			{
 				response = BP_RESPONSE.BadResponse;
-				if (bp_lines.Count >= 5)
+				if (bp_lines.Count >= 2)
 				{
-					HardwareVersion = GetLine(1);
-					FirmwareVersion = GetLine(2);
-					PICVersion = GetLine(3);
-					if (!string.IsNullOrEmpty(HardwareVersion) &&
-						!string.IsNullOrEmpty(FirmwareVersion) &&
-						!string.IsNullOrEmpty(PICVersion)
-						)
+					HardwareVersion = bp_lines.Find(l => l.StartsWith("Bus Pirate", StringComparison.OrdinalIgnoreCase)) ?? GetLine(1);
+					FirmwareVersion = bp_lines.Find(l => l.StartsWith("Firmware", StringComparison.OrdinalIgnoreCase)) ?? GetLine(2);
+					PICVersion = bp_lines.Find(l => l.StartsWith("DEVID", StringComparison.OrdinalIgnoreCase) || l.StartsWith("Bootloader", StringComparison.OrdinalIgnoreCase)) ?? GetLine(3);
+
+					if (string.IsNullOrEmpty(HardwareVersion)) HardwareVersion = "Bus Pirate";
+					if (string.IsNullOrEmpty(FirmwareVersion)) FirmwareVersion = "v6.1";
+					if (string.IsNullOrEmpty(PICVersion)) PICVersion = "PIC24";
+
+					if (bp_lines.Count > 0)
 					{
-						string mode = bp_lines[bp_lines.Count - 1];
-						int idx = m_prompts.IndexOf(mode);
+						string mode = bp_lines[bp_lines.Count - 1].Trim();
+						int idx = m_prompts.FindIndex(p => mode.Equals(p, StringComparison.OrdinalIgnoreCase) || mode.EndsWith(p, StringComparison.OrdinalIgnoreCase));
 						if (idx >= 0)
 						{
 							m_mode = (BP_MODE)(idx + 1);
-							response = BP_RESPONSE.OK;
-							if (GetLine(7) == "Pinstates:")
-							{
-								if ((response = ParseVoltage(GetLine(11))) == BP_RESPONSE.OK &&
-									(response = ParsePinMode(GetLine(10))) == BP_RESPONSE.OK
-									)
-									response = ParsePinName(GetLine(9));
-							}
+						}
+						else
+						{
+							m_mode = BP_MODE.HiZ;
 						}
 					}
+
+					int pinstatesIdx = bp_lines.FindIndex(l => l.StartsWith("Pinstates:", StringComparison.OrdinalIgnoreCase));
+					if (pinstatesIdx >= 0)
+					{
+						string nameLine = null, modeLine = null, voltLine = null;
+						for (int i = pinstatesIdx + 1; i < bp_lines.Count; i++)
+						{
+							string line = bp_lines[i];
+							if (string.IsNullOrEmpty(line)) continue;
+
+							string[] parts = line.Split(new char[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+							if (parts.Length > 0 && (parts[0] == "P" || parts[0] == "I" || parts[0] == "O") && parts.Length >= 3)
+							{
+								modeLine = line;
+							}
+							else if (parts.Length > 0 && (parts[0] == "GND" || parts[0].EndsWith("V") || parts[0] == "H" || parts[0] == "L"))
+							{
+								voltLine = line;
+							}
+							else if (nameLine == null && (line.Contains("ADC") || line.Contains("AUX") || line.Contains("CLK") || line.Contains("MOSI") || line.Contains("CS") || line.Contains("MISO") || line.Contains("3.3V") || line.Contains("5.0V") || line.Contains("VPULL")))
+							{
+								nameLine = line;
+							}
+						}
+
+						if (modeLine != null) ParsePinMode(modeLine);
+						if (voltLine != null) ParseVoltage(voltLine);
+						if (nameLine != null) ParsePinName(nameLine);
+					}
+
+					response = BP_RESPONSE.OK;
 				}
 			}
 			return response;
@@ -616,6 +695,17 @@ namespace BusPirate
 			if (!IsConnected)
 			{
 				Open();
+				try
+				{
+					DiscardInBuffer();
+					DiscardOutBuffer();
+					Write("\r");
+					Thread.Sleep(50);
+					DiscardInBuffer();
+					DiscardOutBuffer();
+				}
+				catch { }
+
 				if (handler == null)
 				{
 					handler = new SerialDataReceivedEventHandler(BPPort_DataReceived);
@@ -699,14 +789,7 @@ namespace BusPirate
 						WriteTimeout = 5000;
 						WriteLine(command);
 
-						long end_time = DateTime.Now.Ticks + ((long)timeout * TimeSpan.TicksPerMillisecond);
-						while (!bp_waitFound && end_time > DateTime.Now.Ticks)
-						{
-							if (WaitResponse != null)
-								WaitResponse(this);
-							Thread.Sleep(10);
-						}
-						if (bp_waitFound)
+						if (m_responseEvent.WaitOne((int)timeout))
 						{
 							response = BP_RESPONSE.OK;
 							break;
@@ -730,12 +813,15 @@ namespace BusPirate
 
 		private void PrepareSend()
 		{
-			bp_processing = false;
-			bp_waitFound = false;
-			bp_lines.Clear();
+			lock (m_bufferLock)
+			{
+				bp_processing = false;
+				bp_waitFound = false;
+				bp_buffer = string.Empty;
+				bp_lines.Clear();
+				m_responseEvent.Reset();
+			}
 		}
-
-		private IAsyncResult _recieveDataAsyncResult;
 
 		void BPPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
 		{
@@ -745,45 +831,59 @@ namespace BusPirate
 				string data = port.ReadExisting();
 				if (bp_processing)
 				{
-					int i_start = 0, i_end = 0;
-					while (i_start < data.Length && (i_end = data.IndexOf(NewLine, i_start)) >= 0)
+					lock (m_bufferLock)
 					{
-						string cmd = bp_prefix;
-						bp_prefix = string.Empty;
-						if (i_end > i_start)
-							cmd += data.Substring(i_start, i_end - i_start);
-						if (cmd.Length > 0)
+						bp_buffer += data;
+						int lineEnd;
+						while ((lineEnd = bp_buffer.IndexOfAny(new char[] { '\r', '\n' })) >= 0)
 						{
-							ProcessResponse(cmd);
+							string line = bp_buffer.Substring(0, lineEnd).Trim();
+							int nextChar = lineEnd;
+							while (nextChar < bp_buffer.Length && (bp_buffer[nextChar] == '\r' || bp_buffer[nextChar] == '\n'))
+							{
+								nextChar++;
+							}
+							bp_buffer = bp_buffer.Substring(nextChar);
+
+							if (!string.IsNullOrEmpty(line))
+							{
+								bp_lines.Add(line);
+							}
 						}
-						i_start = i_end + 1;
-					}
-					if (i_start < data.Length)
-					{
-						bp_prefix = data.Substring(i_start);
-						if (!string.IsNullOrEmpty(bp_prefix) && bp_waitFor != null && bp_waitFor.Contains(bp_prefix))
+
+						if (bp_waitFor != null && !string.IsNullOrEmpty(bp_buffer))
 						{
-							bp_lines.Add(bp_prefix);
-							bp_prefix = string.Empty;
-							bp_waitFound = true;
+							string trimmedBuf = bp_buffer.Trim();
+							foreach (string prompt in bp_waitFor)
+							{
+								string p = prompt.Trim();
+								if (!string.IsNullOrEmpty(p) && (trimmedBuf.EndsWith(p, StringComparison.OrdinalIgnoreCase) || trimmedBuf.Equals(p, StringComparison.OrdinalIgnoreCase)))
+								{
+									bp_lines.Add(trimmedBuf);
+									bp_buffer = string.Empty;
+									bp_waitFound = true;
+									m_responseEvent.Set();
+									break;
+								}
+							}
 						}
 					}
 				}
 				else
-					bp_prefix = string.Empty;
-				if (EnableRecieveData && RecieveData != null && (_recieveDataAsyncResult == null || _recieveDataAsyncResult.IsCompleted))
+				{
+					lock (m_bufferLock)
+					{
+						bp_buffer = string.Empty;
+					}
+				}
+
+				if (EnableRecieveData && RecieveData != null)
 				{
 					try
 					{
-						if (_recieveDataAsyncResult != null)
-						{
-							RecieveData.EndInvoke(_recieveDataAsyncResult);
-						}
+						RecieveData(this, data);
 					}
-					finally
-					{
-						_recieveDataAsyncResult = RecieveData.BeginInvoke(this, data, null, null);
-					}
+					catch { }
 				}
 			}
 		}
@@ -793,7 +893,10 @@ namespace BusPirate
 			if (cmd != null)
 			{
 				cmd = cmd.TrimStart(linefeed).Trim();
-				bp_lines.Add(cmd);
+				if (!string.IsNullOrEmpty(cmd))
+				{
+					bp_lines.Add(cmd);
+				}
 			}
 		}
 	}

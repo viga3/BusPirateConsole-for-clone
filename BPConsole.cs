@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -16,7 +16,6 @@ namespace BusPirate
 		private bool script_changed = false;
 		private IAsyncResult timerResult = null;
 		private IAsyncResult statusResult = null;
-		private IAsyncResult logResult = null;
 
 		public BPConsole()
 		{
@@ -52,6 +51,7 @@ namespace BusPirate
 			{
 				if (ComPort.SelectedIndex >= 0)
 				{
+					Log.Text = "";
 					string port = ComPort.SelectedItem as string;
 					bpPort = new BPPort(port);
 					bpPort.WaitResponse += new BPPort.WaitResponseEventHandle(bpPort_WaitResponse);
@@ -66,8 +66,7 @@ namespace BusPirate
 							groupCommand.Enabled = groupMode.Enabled = true;
 							Mode.SelectedIndex = ((int)bpPort.Mode) - 1;
 							StatusText(bpPort.FirmwareVersion);
-							if (bpPort.Info() == BP_RESPONSE.OK)
-								DisplayPins();
+							DisplayPins();
 
 							SetAutoUpdate();
 							return;
@@ -162,30 +161,18 @@ namespace BusPirate
 
 			if (InvokeRequired)
 			{
-				if (logResult == null || logResult.IsCompleted)
-				{
-					try
-					{
-						if (logResult != null)
-							EndInvoke(logResult);
-					}
-					finally
-					{
-						logResult = BeginInvoke(new Action<string>(AppendLog), data);
-					}
-				}
+				BeginInvoke(new Action<string>(AppendLog), data);
+				return;
 			}
+
+			Log.SuspendLayout();
+			if (Log.Text.Length > 30000)
+				Log.Text = Log.Text.Substring(Log.Text.Length - 15000) + data;
 			else
-			{
-				Log.SuspendLayout();
-				if (Log.Text.Length > 4000)
-					Log.Text = Log.Text.Substring(Log.Text.Length - 4000) + data;
-				else
-					Log.Text += data;
-				Log.SelectionStart = Log.Text.Length;
-				Log.ScrollToCaret();
-				Log.ResumeLayout(false);
-			}
+				Log.Text += data;
+			Log.SelectionStart = Log.Text.Length;
+			Log.ScrollToCaret();
+			Log.ResumeLayout(false);
 		}
 
 		void bpPort_WaitResponse(object sender)
